@@ -1,2 +1,2 @@
 # BO-GP-optimizer
-this is a pravite code storage
+some achivements of the BO hpo optimizer.
