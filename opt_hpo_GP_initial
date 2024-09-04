@@ -1,0 +1,84 @@
+import torch
+from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
+from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
+import optuna
+from optuna.samplers import GPSampler  # 导入高斯过程采样器
+
+# 设置设备和模型配置
+device_map = "cuda:0" if torch.cuda.is_available() else "auto"
+quantization_config = BitsAndBytesConfig(load_in_4bit=False, load_in_8bit=True)
+
+model = AutoModelForCausalLM.from_pretrained(
+    "C:\\Users\\16270\\.cache\\modelscope\\hub\\AI-ModelScope\\opt-1b3",
+    device_map=device_map,
+    torch_dtype=torch.float16,
+    quantization_config=quantization_config,
+    trust_remote_code=True,
+    attn_implementation="flash_attention_2"
+)
+model.eval()
+
+tokenizer = AutoTokenizer.from_pretrained(
+    "C:\\Users\\16270\\.cache\\modelscope\\hub\\AI-ModelScope\\opt-1b3",
+    local_files_only=True
+)
+tokenizer.pad_token = tokenizer.eos_token
+reference_text = "hi, nice to meet you."
+
+# 计算生成文本的评价分数
+def compute_score(generated_text, reference_text):
+    smoothing = SmoothingFunction()
+    bleu_score = sentence_bleu([reference_text.split()], generated_text.split(),
+                                smoothing_function=smoothing.method1)
+    return 100*bleu_score
+
+# 定义目标函数
+def evaluate_model(params):
+    temperature, top_k, top_p = params
+
+    input_ids = tokenizer(['<s>Human:hello\n</s><s>Assistant: '],
+                           return_tensors="pt",
+                           add_special_tokens=False).input_ids
+
+    if torch.cuda.is_available():
+        input_ids = input_ids.to('cuda')
+
+    generate_input = {
+        "input_ids": input_ids,
+        "max_new_tokens": 64,
+        "do_sample": True,
+        "top_k": int(top_k),
+        "top_p": top_p,
+        "temperature": temperature,
+        "repetition_penalty": 1.2,
+        "eos_token_id": tokenizer.eos_token_id,
+        "bos_token_id": tokenizer.bos_token_id,
+        "pad_token_id": tokenizer.pad_token_id
+    }
+
+    generate_ids = model.generate(**generate_input)
+    generated_text = tokenizer.decode(generate_ids[0], skip_special_tokens=True)
+
+    score = compute_score(generated_text, reference_text)
+    return -score  # 最小化负分数
+
+# 定义目标函数用于Optuna优化
+def objective(trial):
+    temperature = trial.suggest_float('temperature', 0.1, 1.0)
+    top_k = trial.suggest_int('top_k', 5, 50)
+    top_p = trial.suggest_float('top_p', 0.1, 0.9)
+
+    score = evaluate_model([temperature, top_k, top_p])
+    return score
+
+# 执行优化过程，使用高斯过程采样器
+study = optuna.create_study(
+    direction='minimize',
+    sampler=GPSampler()
+)
+study.optimize(objective, n_trials=10)
+
+best_params = study.best_params
+best_score = -study.best_value
+print(f"最佳参数: 温度={best_params['temperature']}, top_k={best_params['top_k']}, top_p={best_params['top_p']}")
+print(f"最佳得分: {best_score}")
